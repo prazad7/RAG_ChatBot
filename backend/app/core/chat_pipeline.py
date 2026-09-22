@@ -30,10 +30,14 @@ Never use outside knowledge. Never speculate beyond what the context supports.
 """.format(fallback=FALLBACK_MESSAGE)
 
 _MATCH_EXTRACTION_SYSTEM_PROMPT = """You extract individual records from ONE chunk of a larger document that
-match a question's criterion. Your output feeds a program that combines results from every chunk to compute
+match a question's criteria. Your output feeds a program that combines results from every chunk to compute
 an exact count/list/sum - so it must cover every matching record in THIS chunk, not just the obvious ones.
 
-- Check every record in the chunk against the question's criterion - do not skip or sample.
+- The question states one or more conditions a record must satisfy - re-read it carefully and identify
+  exactly how many separate conditions it actually states (often just one; sometimes two or more joined by
+  "and"/"who also"/etc). A record only counts as a match if it satisfies ALL of the conditions the question
+  ACTUALLY states - never add, assume, or carry over a condition the question didn't mention.
+- Check every record in the chunk against those conditions - do not skip or sample.
 - Match text values case-INsensitively and allow for minor formatting variation (e.g. "Chennai", "chennai",
   and "CHENNAI" are the same city; "ML" and "Machine Learning" may be the same course - use judgment based
   on what the question is asking).
@@ -43,8 +47,10 @@ an exact count/list/sum - so it must cover every matching record in THIS chunk, 
     "ID, Name") - chunks can overlap at their boundaries, so the exact same record may be extracted again
     from a neighboring chunk, and it must produce an IDENTICAL identifier string both times so a
     deduplication step can recognize it as the same record.
-  - "detail": a one-line note with the specific fact(s) relevant to the question (e.g. a numeric value
-    being summed/averaged).
+  - "detail": a one-line note stating the record's actual value for EVERY condition the question mentions,
+    not just one of them - e.g. for "students from Chennai who paid the fee", write both the city and the
+    fee-paid value ("City=Chennai, Fee_Paid=yes"), not just one. A downstream check re-verifies each
+    condition from this text alone, so leaving one out makes a genuine match look unverifiable.
 - If nothing in this chunk matches, that's a completely normal result - don't force a match.
 
 Respond with strict JSON only: {"matches": [{"identifier": "...", "detail": "..."}]}
@@ -119,6 +125,41 @@ async def _extract_chunk_matches(question: str, chunk_text: str) -> list[dict]:
         return []
 
 
+_MATCH_CONSISTENCY_SYSTEM_PROMPT = """A previous extraction step pulled candidate matching records for a
+question out of a large document, chunk by chunk. Occasionally that step makes a mistake: it includes a
+record whose own recorded "detail" doesn't actually satisfy one of the question's conditions (most often
+when the question has more than one condition and the record only satisfies some of them).
+
+Given the question and the candidate list below, re-check each candidate's "detail" against the question's
+conditions and decide if it genuinely satisfies ALL of them. This is a final consistency check on data
+that's already been extracted, not a new search - judge only from what each candidate's own "detail" states.
+
+Respond with strict JSON only: {"keep_identifiers": ["...", "..."]}
+List the "identifier" of every candidate that genuinely satisfies all of the question's conditions. Do not
+include any text outside the JSON object.
+"""
+
+
+def _filter_consistent_matches(question: str, matches: list[dict]) -> list[dict]:
+    if not matches:
+        return matches
+    settings = get_settings()
+    llm = ChatOpenAI(model=settings.openai_chat_model, api_key=settings.openai_api_key, temperature=0)
+    candidates_json = json.dumps(matches)
+    messages = [
+        SystemMessage(content=_MATCH_CONSISTENCY_SYSTEM_PROMPT),
+        HumanMessage(content=f"Question: {question}\n\nCandidates:\n{candidates_json}"),
+    ]
+    try:
+        response = llm.invoke(messages)
+        parsed = _parse_json_response(response.content)
+        keep = {str(i).strip().lower() for i in parsed.get("keep_identifiers", [])}
+        return [m for m in matches if str(m["identifier"]).strip().lower() in keep]
+    except Exception:  # noqa: BLE001
+        logger.warning("Match consistency filter failed; keeping all extracted matches", exc_info=True)
+        return matches
+
+
 def _synthesize_aggregate_answer(question: str, matches: list[dict]) -> str:
     settings = get_settings()
     llm = ChatOpenAI(model=settings.openai_chat_model, api_key=settings.openai_api_key, temperature=0)
@@ -144,7 +185,8 @@ async def _generate_aggregate_answer(question: str, chunks: list[Document]) -> s
                 continue
             seen_identifiers.add(key)
             deduped_matches.append(match)
-    return _synthesize_aggregate_answer(question, deduped_matches)
+    consistent_matches = _filter_consistent_matches(question, deduped_matches)
+    return _synthesize_aggregate_answer(question, consistent_matches)
 
 
 async def run_chat_pipeline(session: SessionState, message: str) -> PipelineResult:
