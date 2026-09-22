@@ -15,6 +15,9 @@ frontend/dist/
 backend/data/
 backend/.deepeval_telemetry.txt
 
+# Local test data
+student_enrollment_raw (1).csv
+
 # Driver artifacts
 .claude/skills/run-rag-chatbot/screenshots/
 .claude/skills/run-rag-chatbot/node_modules/
