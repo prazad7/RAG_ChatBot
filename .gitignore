@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Env files (secrets)
+backend/.env
+frontend/.env
+
+# Node
+node_modules/
+frontend/dist/
+
+# App data
+backend/data/
+backend/.deepeval_telemetry.txt
+
+# Driver artifacts
+.claude/skills/run-rag-chatbot/screenshots/
+.claude/skills/run-rag-chatbot/node_modules/

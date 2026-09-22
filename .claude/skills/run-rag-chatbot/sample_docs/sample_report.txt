@@ -1,0 +1,11 @@
+Acme Corp Quarterly Financial Report
+
+Table 4.1: Q3 Financial Summary
+Q3 Revenue: $10,000,000
+Q3 Net Operating Expenses: $7,500,000
+Q3 Net Profit: $2,500,000
+
+The company's board reviewed these results in the September meeting. Revenue grew 12% year over
+year, driven primarily by the enterprise software division.
+
+Acme Corp was founded in 2010 by Jane Rivera and is headquartered in Austin, Texas.
