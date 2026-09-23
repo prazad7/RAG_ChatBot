@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import get_settings
 from app.core.query_agent import QueryPlan, plan_query
@@ -21,6 +22,16 @@ from app.retrieval.reranker import rerank
 logger = logging.getLogger(__name__)
 
 FALLBACK_MESSAGE = "The query is not relevant to or found within the uploaded document."
+
+# Sub-splits an already-retrieved chunk into smaller windows before per-chunk match extraction
+# (aggregate queries only - see _generate_aggregate_answer). This doesn't touch the actual
+# stored/indexed chunks (chunk_size=1000 in app/ingestion/pipeline.py, tuned for dense/sparse
+# retrieval quality) - it's a purely in-memory re-split of retrieval results, addressing a
+# different problem: LLMs are measurably less reliable at noticing a record positioned in the
+# middle of a multi-record chunk than one near an edge ("lost in the middle"), which caused
+# extraction to consistently miss real matches sitting mid-chunk. Keeping each extraction window
+# small means there's barely a "middle" left to lose anything in.
+_extraction_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=0)
 
 _ANSWER_SYSTEM_PROMPT = """You are a document question-answering assistant. Answer the user's question
 using ONLY the facts present in the provided context. Cite specific figures, tables, or sections from
@@ -50,7 +61,9 @@ an exact count/list/sum - so it must cover every matching record in THIS chunk, 
   - "detail": a one-line note stating the record's actual value for EVERY condition the question mentions,
     not just one of them - e.g. for "students from Chennai who paid the fee", write both the city and the
     fee-paid value ("City=Chennai, Fee_Paid=yes"), not just one. A downstream check re-verifies each
-    condition from this text alone, so leaving one out makes a genuine match look unverifiable.
+    condition from this text alone, so leaving one out makes a genuine match look unverifiable. Include
+    ONLY values for conditions the question actually asks about - do not add other fields from the record
+    "for context"; a single-condition question (e.g. just a course name) gets a single-fact detail.
 - If nothing in this chunk matches, that's a completely normal result - don't force a match.
 
 Respond with strict JSON only: {"matches": [{"identifier": "...", "detail": "..."}]}
@@ -130,13 +143,19 @@ question out of a large document, chunk by chunk. Occasionally that step makes a
 record whose own recorded "detail" doesn't actually satisfy one of the question's conditions (most often
 when the question has more than one condition and the record only satisfies some of them).
 
-Given the question and the candidate list below, re-check each candidate's "detail" against the question's
-conditions and decide if it genuinely satisfies ALL of them. This is a final consistency check on data
-that's already been extracted, not a new search - judge only from what each candidate's own "detail" states.
+First, identify exactly which condition(s) the QUESTION ITSELF states - often just one. A candidate's
+"detail" may mention additional facts about the record that the question never asked about at all (e.g. a
+fee-paid status, when the question only asked about a course); those extra facts are NOT conditions and must
+be completely ignored - never reject a candidate over a fact the question didn't ask about.
+
+Given the question and the candidate list below, re-check each candidate's "detail" against ONLY the
+condition(s) the question actually states, and decide if it genuinely satisfies all of THOSE (not any extra
+facts also present in "detail"). This is a final consistency check on data that's already been extracted,
+not a new search - judge only from what each candidate's own "detail" states.
 
 Respond with strict JSON only: {"keep_identifiers": ["...", "..."]}
-List the "identifier" of every candidate that genuinely satisfies all of the question's conditions. Do not
-include any text outside the JSON object.
+List the "identifier" of every candidate that genuinely satisfies all of the question's own conditions. Do
+not include any text outside the JSON object.
 """
 
 
@@ -173,9 +192,10 @@ def _synthesize_aggregate_answer(question: str, matches: list[dict]) -> str:
 
 
 async def _generate_aggregate_answer(question: str, chunks: list[Document]) -> str:
-    per_chunk_matches = await asyncio.gather(
-        *[_extract_chunk_matches(question, doc.page_content) for doc in chunks]
-    )
+    windows = [
+        window for doc in chunks for window in _extraction_splitter.split_text(doc.page_content)
+    ]
+    per_chunk_matches = await asyncio.gather(*[_extract_chunk_matches(question, w) for w in windows])
     seen_identifiers: set[str] = set()
     deduped_matches: list[dict] = []
     for matches in per_chunk_matches:
