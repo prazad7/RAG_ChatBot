@@ -65,7 +65,14 @@ class Settings(BaseSettings):
     aggregate_dense_candidates: int = 40
     aggregate_sparse_candidates: int = 40
     aggregate_top_k: int = 25
-    aggregate_relevance_threshold: float = 0.02
+    # 0.0: the cross-encoder reranker scores a query about the ABSENCE of a value (e.g. "how many
+    # records have a blank X") near zero against every chunk, since unlike "how many are Chennai"
+    # there's no matching keyword for it to latch onto - even the lowest non-zero threshold tried
+    # still blocked genuinely answerable questions. The per-chunk match extraction + synthesis
+    # step (app/core/chat_pipeline.py) already produces the correct fallback message on its own
+    # when a document genuinely has no matching records, so gating on rerank score here was
+    # redundant for aggregate queries specifically, not a needed safety net.
+    aggregate_relevance_threshold: float = 0.0
 
     # Storage
     data_dir: Path = BACKEND_DIR / "data"
